@@ -1,5 +1,6 @@
 # Information-Extraction-Chinese
 
+## FIRST TO CHECK OUT
 Chinese information extraction, including named entity recognition, relation extraction and more, focused on state-of-art deep learning methods.
 
 

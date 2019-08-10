@@ -8,7 +8,7 @@ from tensorflow.contrib.layers.python.layers import initializers
 import rnncell as rnn
 from utils import result_to_json
 from data_utils import create_input, iobes_iob
-
+from rl_utility import EffectiveWholeLabelRL
 
 class Model(object):
     def __init__(self, config, is_train=True):
@@ -29,7 +29,7 @@ class Model(object):
         self.best_dev_f1 = tf.Variable(0.0, trainable=False)
         self.best_test_f1 = tf.Variable(0.0, trainable=False)
         self.initializer = initializers.xavier_initializer()
-        
+        self.effective_rl = EffectiveWholeLabelRL()
         
 
         # add placeholders for the model
@@ -329,7 +329,7 @@ class Model(object):
             feed_dict[self.dropout] = self.config["dropout_keep"]
         return feed_dict
 
-    def run_step(self, sess, is_train, batch):
+    def run_step(self, sess, is_train, batch, need_reward=False, id_to_tag=dict()):
         """
         :param sess: session to run the batch
         :param is_train: a flag indicate if it is a train batch
@@ -341,6 +341,10 @@ class Model(object):
             global_step, loss, _ = sess.run(
                 [self.global_step, self.loss, self.train_op],
                 feed_dict)
+            if need_reward:
+
+                lengths, logits = sess.run([self.lengths, self.logits], feed_dict)
+                self.get_reward(sess, batch, lengths, logits, id_to_tag)
             return global_step, loss
         else:
             lengths, logits = sess.run([self.lengths, self.logits], feed_dict)
@@ -366,6 +370,39 @@ class Model(object):
 
             paths.append(path[1:])
         return paths
+
+    def get_reward(self,sess, batch, lengths, scores, id_to_tag):
+        results = []
+        strings = batch[0]
+        tags = batch[-1]
+        trans = self.trans.eval()
+        batch_paths = self.decode(scores, lengths, trans)
+        for i in range(len(strings)):
+            result = []
+            string = strings[i][:lengths[i]]
+            gold = iobes_iob([id_to_tag[int(x)] for x in tags[i][:lengths[i]]])
+            pred = iobes_iob([id_to_tag[int(x)] for x in batch_paths[i][:lengths[i]]])
+            for char, gold, pred in zip(string, gold, pred):
+                result.append(" ".join([char, gold, pred]))
+            results.append(result)
+        predicts = []
+        targets = []
+        rewards = []
+        for item in results:
+            predict = [ ner_item.split(" ")[1] for ner_item in item]
+            target = [ner_item.split(" ")[2] for ner_item in item]
+            if predict != target:
+                # print( "wrong", predict, target)
+                rewards.append(0)
+            else:
+                rewards.append(1)
+            predicts.append(predict)
+            targets.append(target)
+        rewards = self.effective_rl.compute_reward(predicts, targets)
+        print(rewards)
+        assert(len(strings) == len(predicts))
+
+
 
     def evaluate(self, sess, data_manager, id_to_tag):
         """

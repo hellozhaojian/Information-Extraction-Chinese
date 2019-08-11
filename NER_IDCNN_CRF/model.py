@@ -44,6 +44,9 @@ class Model(object):
         self.targets = tf.placeholder(dtype=tf.int32,
                                       shape=[None, None],
                                       name="Targets")
+
+        self.rewards = tf.placeholder(dtype=tf.float32, shape=[None, None], name="rewards")
+
         # dropout keep prob
         self.dropout = tf.placeholder(dtype=tf.float32,
                                       name="Dropout")
@@ -103,8 +106,16 @@ class Model(object):
         else:
             raise KeyError
 
+        self.action_prob = self.effective_rl.get_tag_action_probability(self.logits, self.targets)
+        # rl_loss
+        print(tf.reshape(self.rewards, [-1]))
+        print(self.action_prob)
+        self.rl_loss = -1.0 * tf.reduce_sum(self.action_prob * tf.reshape(self.rewards, [-1]))
+        # self.rl_loss = -1.0 * tf.reduce_sum(self.logits)
+
         # loss of the model
         self.loss = self.loss_layer(self.logits, self.lengths)
+
 
         with tf.variable_scope("optimizer"):
             optimizer = self.config["optimizer"]
@@ -122,6 +133,17 @@ class Model(object):
             capped_grads_vars = [[tf.clip_by_value(g, -self.config["clip"], self.config["clip"]), v]
                                  for g, v in grads_vars]
             self.train_op = self.opt.apply_gradients(capped_grads_vars, self.global_step)
+
+            # compute rl_op
+            grads_vars_rl = self.opt.compute_gradients(self.rl_loss)
+            new_grads_vars_rl = []
+            for g,v in grads_vars_rl:
+                if g is not None:
+                    new_grads_vars_rl.append( (g,v) )
+            capped_grads_vars_rl = [[tf.clip_by_value(g, -self.config["clip"], self.config["clip"]), v]
+                                  for g, v in new_grads_vars_rl]
+            self.train_rl_op = self.opt.apply_gradients(capped_grads_vars_rl, self.global_step)
+
 
         # saver of the model
         self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=5)
@@ -187,7 +209,6 @@ class Model(object):
         with tf.variable_scope("idcnn" if not name else name):
             shape=[1, self.filter_width, self.embedding_dim,
                        self.num_filter]
-            print(shape)
             filter_weights = tf.get_variable(
                 "idcnn_filter",
                 shape=[1, self.filter_width, self.embedding_dim,
@@ -329,6 +350,25 @@ class Model(object):
             feed_dict[self.dropout] = self.config["dropout_keep"]
         return feed_dict
 
+    def run_rl(self, sess, is_train, batch, id_to_tag):
+        feed_dict = self.create_feed_dict(is_train, batch)
+        global_step, loss, lengths, action_prob = sess.run(
+            [self.global_step, self.loss, self.lengths, self.action_prob],
+            feed_dict)
+
+        strings = batch[0]
+        tags = batch[-1]
+        target_tags = []
+        for i in range(len(strings)):
+            gold = iobes_iob([id_to_tag[int(x)] for x in tags[i][:lengths[i]]])
+            target_tags.append(gold)
+        rewards = self.effective_rl.compute_tag_reward(target_tags)
+        # print(rewards.shape, "!!!!!!!!!!!!! the tag rewards", rewards.shape[1], rewards.shape[1]>1)
+        #rewards = np.reshape(rewards, [-1])
+        feed_dict[self.rewards] = rewards
+        global_step, rl_loss, _ = sess.run([self.global_step, self.rl_loss, self.train_rl_op], feed_dict)
+        return global_step, loss, rl_loss
+
     def run_step(self, sess, is_train, batch, need_reward=False, id_to_tag=dict()):
         """
         :param sess: session to run the batch
@@ -338,14 +378,23 @@ class Model(object):
         """
         feed_dict = self.create_feed_dict(is_train, batch)
         if is_train:
-            global_step, loss, _ = sess.run(
-                [self.global_step, self.loss, self.train_op],
+            global_step, loss, _, lengths, action_prob = sess.run(
+                [self.global_step, self.loss, self.train_op, self.lengths, self.action_prob],
                 feed_dict)
-            if need_reward:
 
-                lengths, logits = sess.run([self.lengths, self.logits], feed_dict)
-                self.get_reward(sess, batch, lengths, logits, id_to_tag)
-            return global_step, loss
+            rewards = None
+            if need_reward:
+                strings = batch[0]
+                tags = batch[-1]
+                target_tags = []
+                for i in range(len(strings)):
+                    gold = iobes_iob([id_to_tag[int(x)] for x in tags[i][:lengths[i]]])
+                    target_tags.append(gold)
+                rewards = self.effective_rl.compute_tag_reward(target_tags)
+                # print(rewards.shape, "!!!!!!!!!!!!! the tag rewards", rewards.shape[1], rewards.shape[1]>1)
+                # rewards = np.reshape(rewards, [-1])
+
+            return global_step, loss, rewards, action_prob
         else:
             lengths, logits = sess.run([self.lengths, self.logits], feed_dict)
             return lengths, logits
@@ -398,8 +447,9 @@ class Model(object):
                 rewards.append(1)
             predicts.append(predict)
             targets.append(target)
-        rewards = self.effective_rl.compute_reward(predicts, targets)
-        print(rewards)
+        rewards = self.effective_rl.compute_sentence_reward(predicts, targets)
+
+        # print(rewards)
         assert(len(strings) == len(predicts))
 
 

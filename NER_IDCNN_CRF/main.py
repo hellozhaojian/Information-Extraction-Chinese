@@ -85,16 +85,16 @@ def config_model(char_to_id, tag_to_id):
 def evaluate(sess, model, name, data, id_to_tag, logger):
     logger.info("evaluate:{}".format(name))
     ner_results = model.evaluate(sess, data, id_to_tag)
-    # print(ner_results)
-    predicts = []
-    targets = []
-    for item in ner_results:
-        predict = [ ner_item.split(" ")[1] for ner_item in item]
-        target = [ner_item.split(" ")[2] for ner_item in item]
-        if predict != target:
-            print( "wrong", predict, target)
-        predicts.append(predict)
-        targets.append(target)
+    # # print(ner_results)
+    # predicts = []
+    # targets = []
+    # for item in ner_results:
+    #     predict = [ ner_item.split(" ")[1] for ner_item in item]
+    #     target = [ner_item.split(" ")[2] for ner_item in item]
+    #     if predict != target:
+    #         print( "wrong", predict, target)
+    #     predicts.append(predict)
+    #     targets.append(target)
     eval_lines = test_ner(ner_results, FLAGS.result_path)
     for line in eval_lines:
         logger.info(line)
@@ -187,14 +187,22 @@ def train():
         loss = []
         for i in range(100):
             for batch in train_manager.iter_batch(shuffle=True):
-                step, batch_loss = model.run_step(sess, True, batch, True, id_to_tag)
+                step, batch_loss, rewards, action_prob = model.run_step(sess, True, batch, True, id_to_tag)
+                # print(rewards.shape, action_prob.shape)
                 loss.append(batch_loss)
                 if step % FLAGS.steps_check == 0:
                     iteration = step // steps_per_epoch + 1
                     logger.info("iteration:{} step:{}/{}, "
                                 "NER loss:{:>9.6f}".format(
                         iteration, step%steps_per_epoch, steps_per_epoch, np.mean(loss)))
+
                     loss = []
+                    # for reinforcement learning
+                    step, rl_loss, rl_loss = model.run_rl(sess, True, batch, id_to_tag)
+                    logger.info("iteration:{} step:{}/{}, "
+                                "RL loss:{:>9.6f}".format(
+                        iteration, step%steps_per_epoch, steps_per_epoch, rl_loss))
+
 
             best = evaluate(sess, model, "dev", dev_manager, id_to_tag, logger)
             if best:
